@@ -1,0 +1,313 @@
+
+----查看指定进程号会话及SQL执行情况
+----search specific task/process session and sql performing
+select a.sid, a.SERIAL#,a.sql_id, b.spid, a.status, a.PROGRAM,a.username,a.user#,a.osuser
+from v$session a, V$PROCESS b
+where b.spid = 3113
+and a.paddr=b.ADDR
+order by a.sid;
+
+----specific task/process sql text
+select sql_text from v$sql where sql_id=(
+select a.sql_id
+from v$session a, V$PROCESS b
+where b.spid = 682
+and a.paddr=b.ADDR);
+
+
+-----查看表空间使用情况
+----check tablespace usage
+SELECT UPPER (F.TABLESPACE_NAME) "表空间名",
+         D.TOT_GROOTTE_MB "表空间大小(M)",
+         D.TOT_GROOTTE_MB - F.TOTAL_BYTES "已使用空间(M)",
+         TO_CHAR (ROUND ((D.TOT_GROOTTE_MB - F.TOTAL_BYTES) / D.TOT_GROOTTE_MB * 100, 2), '990.99') "使用比",
+         F.TOTAL_BYTES "空闲空间(M)",
+         F.MAX_BYTES "最大块(M)"
+    FROM (  SELECT TABLESPACE_NAME,
+                   ROUND (SUM (BYTES) / (1024 * 1024), 2) TOTAL_BYTES,
+                   ROUND (MAX (BYTES) / (1024 * 1024), 2) MAX_BYTES
+              FROM SYS.DBA_FREE_SPACE
+          GROUP BY TABLESPACE_NAME) F,
+         (  SELECT DD.TABLESPACE_NAME,
+                   ROUND (SUM (DD.BYTES) / (1024 * 1024), 2) TOT_GROOTTE_MB
+              FROM SYS.DBA_DATA_FILES DD
+          GROUP BY DD.TABLESPACE_NAME) D
+   WHERE D.TABLESPACE_NAME = F.TABLESPACE_NAME
+ORDER BY 4 DESC;
+
+select a.TABLESPACE_NAME,b.FILE_NAME,a.TABLESPACE_SIZE,a.USED_PERCENT from dba_tablespace_usage_metrics a
+right join dba_data_files b on a.TABLESPACE_NAME=b.TABLESPACE_NAME;
+
+-----查看表空间浪费存储空间比例(表数据实际使用空间)
+----check tablespace fragment status
+select a.tablespace_name,b.bb||'M' as tablespace_use,a.aa||'M' as segment_use,(b.bb-a.aa)||'M' as diff ,((b.bb-a.aa)/b.bb)||'%' as "diff/tablespace_use" from( 
+select tablespace_name,sum(bytes)/1024/1024 as aa from dba_segments where tablespace_name like 'DATA%' 
+group by tablespace_name ) a,
+(select tablespace_name,used_space*16384/1024/1024 as bb from dba_tablespace_usage_metrics where tablespace_name like 'DATA%' )b
+where a.tablespace_name=b.tablespace_name;
+
+
+select a.tablespace_name,b.bb||'M' as tablespace_use,a.aa||'M' as segment_use,(b.bb-a.aa)||'M' as diff ,((b.bb-a.aa)/b.bb)||'%' as "diff/tablespace_use" from( 
+select tablespace_name,sum(bytes)/1024/1024 as aa from dba_segments where tablespace_name like 'DATA%' 
+group by tablespace_name ) a,
+(select tablespace_name,sum(bytes)/1024/1024 as bb from dba_free_space where tablespace_name like 'DATA%'  group by tablespace_name ) b
+where a.tablespace_name=b.tablespace_name;
+
+select c.tablespace_name, c.cc as segment_used, d.used as datafile_used, (d.used - c.cc) || 'M' as diff from( 
+select tablespace_name,sum(bytes)/1024/1024 as cc from dba_segments group by tablespace_name ) c,
+(select a.tablespace_name, (a.aa-b.bb)/1024/1024 as used 
+from (select tablespace_name,sum(bytes) as aa from dba_data_files group by tablespace_name) a,
+(select tablespace_name,sum(bytes) as bb from dba_free_space group by tablespace_name) b 
+where a.tablespace_name=b.tablespace_name) d
+where c.tablespace_name=d.tablespace_name;
+
+
+----查看TM和TX锁对应会话和语句
+----check session and sql of TM lock and TX lock
+select c.*,d.SQL_TEXT from (
+select a.sid,a.type,decode(a.lmode,0,'None',1,'Null',2,'Row share',3,'Row Exclusive',4,'Share',5,'Share Row Exclusive',6,'Exclusive')
+as lock_type,b.PROGRAM,b.SQL_ID,b.USERNAME,b.SCHEMANAME,b.OSUSER,b.MACHINE,b.STATUS,a.block
+from v$lock a,v$session b
+where a.TYPE IN('TX','TM')
+and a.sid=b.sid
+order by program) c 
+left join v$sql d on c.sql_id=d.sql_id
+
+
+----check performing on terminal command
+ps -eo uid,pid,ppid,pcpu,pmem,time,stat,cmd --sort stat,ppid |grep Z |grep -v grep
+
+
+----TOP 20 disk reads SQL
+select * from
+(select parsing_user_id,executions,sorts,command_type,disk_reads,sql_text from v$sqlarea
+order by disk_reads desc) where rownum < 21;
+
+--IO消耗高的SQL
+----TOP I/O SQL
+SELECT se.sid,se.serial#,pr.SPID,se.username,se.status,se.terminal,se.program,se.MODULE, se.sql_address,st.event,st.p1text,si.physical_reads,si.block_changes
+FROM v$session se, v$session_wait st,v$sess_io si,v$process pr
+WHERE st.sid=se.sid AND st.sid=si.sid
+AND se.PADDR=pr.ADDR
+AND se.sid>6
+AND st.wait_time=0
+ORDER BY physical_reads DESC
+
+
+
+-----------------------
+
+---- top waitting (excuting time)
+select * from v$session_wait where sid in (select sid from v$sess_time_model 
+where stat_id = (select stat_id from v$sys_time_model where stat_name='sql execute elapsed time')
+and length(value)>5);
+
+
+select * from v$session where serial# in (select serial# from (
+select serial#,max(time_waited) From v$session_wait_class where sid in (select sid from v$sess_time_model 
+where stat_id = (select stat_id from v$sys_time_model where stat_name='sql execute elapsed time')
+and length(value)>5)
+group by  serial# ))
+
+
+----check share_pool fragments
+select KSMCHIDX "SubPool", 'sga heap('||KSMCHIDX||',0)'sga_heap,ksmchcom ChunkComment,
+decode(round(ksmchsiz/1000),0,'0-1K', 1,'1-2K', 2,'2-3K',3,'3-4K',
+4,'4-5K',5,'5-6k',6,'6-7k',7,'7-8k',8,
+'8-9k', 9,'9-10k','> 10K') "size",
+count(*),ksmchcls Status, sum(ksmchsiz) Bytes
+from x$ksmsp
+where KSMCHCOM = 'free memory'
+group by ksmchidx, ksmchcls,
+'sga heap('||KSMCHIDX||',0)',ksmchcom, ksmchcls,decode(round(ksmchsiz/1000),0,'0-1K',
+1,'1-2K', 2,'2-3K', 3,'3-4K',4,'4-5K',5,'5-6k',6,
+'6-7k',7,'7-8k',8,'8-9k', 9,'9-10k','> 10K')
+order by status,"size";
+
+
+
+----------------------执行时间超过6秒的SQL
+----performing time more than 6 sec
+select * from (
+select a.hash_value,a.SQL_TEXT,a.BUFFER_GETS,a.cpu_time,a.ELAPSED_TIME,b.OPNAME,b.ELAPSED_SECONDS,b.MESSAGE,b.USERNAME
+from v$sqlarea a,v$session_longops b 
+where a.HASH_VALUE=b.SQL_HASH_VALUE
+order by elapsed_seconds desc,cpu_time desc,buffer_gets desc
+) where rownum <21; 
+
+
+
+-----------------占用锁的会话和sql
+----check session,sql which are using lock
+select t2.sid, t2.serial#,t2.username,t2.PROGRAM,t2.STATUS,t3.sql_text,t3.last_active_time
+from v$locked_object t1, v$session t2,v$sql t3
+where t1.session_id = t2.sid 
+and t2.sql_hash_value=t3.hash_value;
+
+
+SELECT p.spid, a.serial#, c.object_name, b.session_id, b.oracle_username,
+       b.os_user_name
+  FROM v$process p, v$session a, v$locked_object b, all_objects c
+ WHERE p.addr = a.paddr AND a.process = b.process
+       AND c.object_id = b.object_id
+
+------------占用锁和等待的进程
+----check process/task using lock and waitting
+SELECT /*+ rule */
+lpad(' ', decode(l.xidusn, 0, 3, 0)) || l.oracle_username User_name,
+o.owner,o.object_name,o.object_type,s.sid,s.serial#,p.spid
+FROM v$locked_object l, dba_objects o, v$session s, v$process p
+WHERE l.object_id = o.object_id
+AND l.session_id = s.sid 
+and s.paddr = p.addr
+ORDER BY o.object_id, xidusn DESC
+
+
+----------资源消耗多的SQL
+----SQL get more buffer or disk reads
+SELECT sql_text,hash_value, executions, buffer_gets, disk_reads, parse_calls
+FROM V$SQLAREA
+WHERE buffer_gets > 10000000 OR disk_reads > 1000000
+ORDER BY buffer_gets + 100 * disk_reads DESC;
+
+----SQL get more cpu
+select * from (
+SELECT sql_text,hash_value, executions, buffer_gets, disk_reads, parse_calls
+FROM V$SQLAREA
+ORDER BY cpu_time  DESC)
+where rownum<21;
+
+
+-----------资源消耗多的sql的执行计划
+----sql excute plan which using more resource
+select a.ADDRESS,a.HASH_VALUE,a.id,a.OPERATION,a.OPTIONS,a.OBJECT_NAME,a.OPTIMIZER,
+a.COST,a.CARDINALITY,a.BYTES,a.CPU_COST,a.IO_COST from v$sql_plan a, (
+select address,hash_value from (
+SELECT address,hash_value
+FROM V$SQLAREA
+WHERE buffer_gets > 10000000 OR disk_reads > 1000000
+ORDER BY buffer_gets + 100 * disk_reads DESC)
+where rownum<11) b
+where a.ADDRESS=b.address
+and a.HASH_VALUE=b.hash_value
+order by a.ADDRESS,a.HASH_VALUE,a.id
+
+select a.ADDRESS,a.HASH_VALUE,a.id,a.OPERATION,a.OPTIONS,a.OBJECT_NAME,a.OPTIMIZER,
+a.COST,a.CARDINALITY,a.BYTES,a.CPU_COST,a.IO_COST
+from v$sql_plan a ,v$sqlarea b
+where a.hash_value=b.hash_value
+and a.ADDRESS=b.address
+and b.hash_value='449894368';
+
+
+======================================
+
+ps aux |head -1 ;ps aux |sort -rn +2 +4 | grep oracle |head -20
+ps aux |head -1 ;ps aux |sort -rn +3|grep oracle |head -20
+
+ps vx |head -1 ;ps vx |sort -rn +4 | grep oracle
+
+======================================
+explain play for
+
+select * from table(dbms_xplan.display);
+
+
+==============================================
+with ltr as (
+select to_char(sysdate,'YYYYMMDDHH24MISS') TM,
+       s.sid,
+       s.sql_id,
+       s.sql_child_number,
+       s.prev_sql_id,
+       xid,
+       to_char(t.start_date,'YYYYMMDDHH24MISS') start_time,
+       e.TYPE,e.block,
+       e.ctime,
+       decode(e.CTIME, 0, (sysdate - t.start_date) * 3600*24, e.ctime) el_second 
+     --  q.sql_text
+  from v$transaction t, v$session s,v$transaction_enqueue e
+ where t.start_date <= sysdate - interval '1000' second     /*查询开始多少秒的事务*/
+   and t.addr = s.taddr
+   --and s.sql_child_number = q.CHILD_NUMBER(+)
+   --and s.sql_id = q.sql_id(+) and s.prev_sql_id = q.sql_id(+)
+   and t.addr = e.addr(+) ) 
+  select ltr.* , (select q1.sql_text from v$sql q1 where ltr.prev_sql_id = q1.sql_id(+)
+   and rownum = 1) prev_sql_text ,
+  (select q1.sql_text from v$sql q1 where ltr.sql_id = q1.sql_id(+)
+   and ltr.sql_child_number = q1.CHILD_NUMBER(+)) sql_text
+   from ltr ltr;
+   
+   
+   
+
+
+----rollback segments
+SELECT r.NAME 回滚段名,s.sid SID,s.serial# Serial,
+       s.username 用户名,s.machine 机器名,
+       t.start_time 开始时间,t.status 状态,
+       t.used_ublk 撤消块,USED_UREC 撤消记录,
+       t.cr_get 一致性取,t.cr_change 一致性变化,
+       t.log_io "逻辑I/O",t.phy_io "物理I/O",
+       t.noundo NoUndo,g.extents Extents,substr(s.program, 1, 50) 操作程序
+  FROM v$session s, v$transaction t, v$rollname r,v$rollstat g
+WHERE t.addr = s.taddr
+   AND t.xidusn = r.usn
+   AND r.usn = g.usn
+ORDER BY t.used_ublk desc;
+
+
+
+SQL> connect /as sysdba
+SQL> @?/rdbms/admin/utlxplan.sql  --建立plan_table表
+SQL> create public synonym plan_table for plan_table;
+SQL> grant all on plan_table to public;
+SQL> @?/sqlplus/admin/plustrce.sql  --建立plustrace角色
+SQL> grant plustrace to public;
+在有了plan_table表和plustrace角色的情况下：
+1、先explain plan for sql_stmt;
+把SQLPLUS的linesize参数调整到至少120，把pagesize值调到可以一页显示完整信息；
+然后 @?/rdbms/admin/utlxplp 或 select * from table(dbms_xplan.display()); 看执行计划，如：
+explain plan for sql_stmt;
+set autot off
+set hea off
+set lines 150
+set pages 0
+select * from table(dbms_xplan.display);
+2、先 set autotrace on 然后直接执行sql_stmt;会自动显示执行计划和统计信息。
+缺点：用该方法查看执行时间较长的sql语句时，需要等待该语句执行成功后，才返回执行计划，使优化的周期大大增长。
+如果不想执行语句而只是想得到执行计划可以采?set autotrace traceonly 这样，就只会列出执行计划，而不会真正的执行语句，大大减少了优化时间。虽然也列出了统计信息，但是因为没有执行语句，所以该统计信息没有用处。
+set autotrace 选项
+on       显示查询结果，执行计划，统计数据
+on statistics 显示查询结果，统计数据，不显示执行计划
+on explain   显示查询结果，执行计划，不显示统计数据
+traceonly   显示执行计划和统计结果，但不包括查询结果
+traceonly statistics 仅显示统计数据
+--统计信息的各个参数的意思：
+statistics
+---------------------------------------------------------
+     10  recursive calls
+     33  db block gets
+  11244060  consistent gets
+   330674  physical reads
+     68  redo size
+132579265  bytes sent via SQL*Net to client
+  2147396  bytes received via SQL*Net from client
+   58033  SQL*Net roundtrips to/from client
+     4  sorts (memory)
+     1  sorts (disk)
+   870466  rows processed
+recursive Calls. 在用户级和系统级产生的递归调用的数目。Oracle数据库维护用于内部处理的表。当它需要改变那些表时，Oracle数据库生成一个内部SQL语句，该语句反过来产生一个递归调用。简而言之，因此，如果你必须解析该查询，例如，你可能必须运行一些其他的查询来得到数据字典的信息。这就是递归调用。空间管理、安全性检查、从SQL中调用PL/SQL，所有这些都会引起递归SQL调用。
+db block gets. 当前块被请求的次数。当存在时，当前（current）模式块将被立即检索，而不会以一致读的方式检索。通常，查询检索的块如果在查询开始时存在，它们就被检索。当前模式块如果存在就立即被检索，而不是从一个以前的时间点检索。在一个SELECT期间，你可以看到当前模式检索，因为对于需要进行全面扫描的表来说，需要读数据字典来找到范围信息（因为你需要"立即"信息，而不是一致读）。在修改期间，为了向块中写入内容，你要以当前模式访问块。
+consistent gets. 对于一个块一致读被请求的次数。这是你以"一致读"模式处理的块数。为了回滚一个块，这将包括从回滚段读取的块的数目。例如，这是你在SELECT语句中读取块的模式。当你进行一个指定的UPDATE/DELETE操作时，你也以一致读模式读取块，然后以当前模式获得块以便实际进行修改。
+physical Reads. 从磁盘读取的数据块的总数。这个数等于"physical reads direct"（物理上直接读取的块数）的值加上读入缓存区的所有块数。
+redo Size. 所产生的以字节为单位的redo（重做日志）总数。
+bytes Sent via SQL*Net to Client. 从前台进程发送到客户端的字节总数。一般来说，这是你的结果集的整体大小。
+bytes Received via SQL*Net from Client. 通过网络从客户端收到的字节总数。一般来说，这是通过网络传输的你的查询的大小。
+SQL*Net Round-trips to/from Client. 发送到客户端和从客户端接收的网络消息总数。一般来说，这是为了得到回答在你和服务器间发生的交互次数。当你在SQL*Plus中增加ARRAYSIZE 设置值时，你将看到对于返回多条记录的SELECT语句，这个数字会下降（更少的来回交互，因为每获取N条记录是一个来回）。当你减少你的 ARRAYSIZE值时，你将看到这个数字增加。
+sorts (memory). 完全在内存中执行、且不需要任何磁盘写的排序操作的数目。没有比在内存中排序更好的排序了，除非根本没有排序。排序通常是由表连接SQL操作的选择条件设定所引起的。
+sorts (disk). 至少需要一次磁盘写的排序操作的次数。需要磁盘输入/输出的排序操作需要耗费大量资源。请试着增加初始化参数SORT_AREA_SIZE的大小。
+rows Processed. 这是由SELECT语句所返回的或是由INSERT、UPDATE或DELETE语句修改的总行数。
+
+
+
